@@ -25,35 +25,30 @@ Software and Key Package Versions:
 ----------------------------------
 - R version: [R 4.4.1]
 - Key R packages used in this project include (with version numbers):
-    •  sf: e.g., version 1.0-0 (built under R 4.4.2; linking to GEOS 3.12.2, GDAL 3.9.3, PROJ 9.4.1)
-    •  spdep: (built under R 4.4.2)
-    •  ggplot2: e.g., version 3.3.6
-    •  viridis: (version as provided by CRAN)
-    •  car: (version as provided by CRAN)
-    •  spatstat.explore: e.g., version 3.3-2
-    •  spatstat.geom: e.g., version 3.3-3
-    •  spatstat.model: e.g., version 3.3-2
-    •  network: installed version 1.18.2 (update available: 1.19.0)
-    •  ggspatial: (built under R 4.4.2)
-    •  vegan: e.g., version 2.6-8
-    •  scales: (version as provided by CRAN)
-    •  dplyr: (version as provided by CRAN)
-    •  patchwork: (version as provided by CRAN)
-    •  tidygraph: (version as provided by CRAN)
-    •  ggraph: (version as provided by CRAN)
-    •  GGally: (version as provided by CRAN)
-    •  FSA: e.g., version 0.9.5
-    •  ggpubr: (version as provided by CRAN)
-    •  writexl: (version as provided by CRAN)
-    •  openxlsx: (version as provided by CRAN)
-    •  sna: e.g., version 2.8 (created on 2024-09-07)
-    •  statnet: e.g., version 2019.6 (2019-06-13)
-    •  igraph: (version as provided by CRAN)
-    •  DT: (version as provided by CRAN)
-    •  tnet: (version as provided by CRAN)
-    •  kableExtra: (version as provided by CRAN)
-    •  readxl: (version as provided by CRAN)
-    •  dunn.test: (version as provided by CRAN)
+    •  terra: version 1.8.5
+    •  sf: version 1.0.19
+    •  raster: version 3.6.32
+    •  ggplot2: version 3.5.1
+    •  ggnewscale: version 0.5.1
+    •  ggspatial: version 1.1.9
+    •  tidyverse: version 2.0.0
+    •  ggpubr: version 0.6.0
+    •  ggfortify: version 0.4.17
+    •  visreg: version 2.7.0
+    •  vcd: version 1.4.13
+    •  scatterplot3d: version 0.3.44
+    •  dplyr: version 1.1.4
+    •  tidyr: version 1.3.1
+    •  strucchange: version 1.5.4
+    •  tmap: version 4.0
+    •  spdep: version 1.3.8
+    •  spatialreg: version 1.3.6
+    •  gstat: version 2.1.3
+    •  sp: version 2.1.4
+    •  ggthemes: version 5.1.0
+    •  ggrepel: version 0.9.6
+    •  corrplot: version 0.95
+    •  viridis: version 0.6.5
 
 Getting Started:
 ----------------------------------
