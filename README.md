@@ -1,32 +1,20 @@
 Conflict And Social Centralization In Tairona Chiefdom Communities In The Río Frío Basin, Sierra Nevada De Santa Marta, Colombia
 --------------------------------------------------------------
 
-This repository contains the R code and data used to analyze the interaction networks in the Tairona chiefdom communities of the Río Frío Basin (Sierra Nevada de Santa Marta, Colombia). The goal of the study is to investigate settlement patterns and scales of sociopolitical interaction and economic integration over time, using network analysis applied to ceramic artifact assemblages.
+This repository contains the R scripts and datasets used to examine how conflict shaped socio-political organization and demographic centralization in the Tairona chiefdom communities of the Río Frío Basin (Sierra Nevada de Santa Marta, Colombia) during the final pre-Hispanic occupation (10th–16th centuries AD).
 
 Repository Structure:
 ----------------------------------
-1. Database:
-   - Contains the Excel files with the datasets used in the analysis:
-     • Buritaca_Desgrasantes.xlsx
-     • Buritaca_Desgrasantes_attr.xlsx
-     • Buritaca_Tipos.xlsx
-     • Buritaca_Tipos_attr.xlsx
-     • Neguanje_Desgrasantes.xlsx
-     • Neguanje_Desgrasantes_attr.xlsx
-     • Neguanje_Tipos.xlsx
-     • Neguanje_Tipos_attr.xlsx
-     • Tairona_Desgrasantes.xlsx
-     • Tairona_Desgrasantes_attr.xlsx
-     • Tairona_Tipos.xlsx
-     • Tairona_Tipos_attr.xlsx
-
-2. GIS:
-   - Contains the spatial data files (shapefile components) defining the study area:
+1. GIS:
+   - Contains the spatial data files (shapefile components and raster files) defining the study area:
      • POLYGON_SURVEY_UNTILL_2023.shp
      • ALL_SITES_TAIRONA_PERIOD.shp
+     • SITES_VIEWSHED.shp
+     • ALL_STRUCTURES_TAIRONA.shp
      • CENTROID_SITES_TAIRONA.shp
+     • DEM_40KM.tif
 
-3. R Code Files:
+2. R Code Files:
    - The main R script (or R Markdown file) contains the code to:
      a) Load required packages.
      b) Download the Excel datasets and GIS files directly from GitHub.
@@ -77,7 +65,7 @@ Getting Started:
 
 Manuscript Summary:
 ----------------------------------
-This article investigates how conflict influenced the socio political organization and demographic centralization of the Tairona chiefdom communities in the Río Frío Basin of the Sierra Nevada de Santa Marta during the final pre Hispanic occupation, the Tairona period (10th–16th centuries AD). Based on European chronicles and geostatistical methods, we investigate the existence of the Pocigüeica chiefdom, an apparent political entity recognized for its belligerent character and led by warrior chiefs with a decision-making structure segmented into factions or kinship groups, which resisted the Spanish conquest in the 16th century AD. A systematic study of 40 km² in the Río Frío basin examines how conflict influenced population distribution and pre-Hispanic political integration in these communities. Although ethnohistoric sources highlight the belligerence of Tairona chiefdom communities, archaeological research has so far not explored the relationship between conflict, political leadership and social organization. Thus, this article proposes and explores the roll of the conflict in shaping the socio-political complexity in the prehispanic complex societies of the Sierra Nevada de Santa Marta.
+This article investigates how conflict influenced the socio‑political organization and demographic centralization of the Tairona chiefdom communities in the Río Frío Basin of the Sierra Nevada de Santa Marta during the final pre‑Hispanic occupation, the Tairona period (10th–16th centuries AD). Based on European chronicles and geostatistical methods, we investigate the existence of the Pocigüeica chiefdom, an apparent political entity recognized for its belligerent character and led by warrior chiefs with a decision-making structure segmented into factions or kinship groups, which resisted the Spanish conquest in the 16th century AD. A systematic study of 40 km² in the Río Frío basin examines how conflict influenced population distribution and pre-Hispanic political integration in these communities. Although ethnohistoric sources highlight the belligerence of Tairona chiefdom communities, archaeological research has so far not explored the relationship between conflict, political leadership and social organization. Thus, this article proposes and explores for the first time in the archaeology of the Sierra Nevada de Santa Marta the evaluation of the conflict in shaping the socio-political complexity of the region.
 
 For questions or further information, please contact:
 lms313@pitt.edu
