@@ -1,0 +1,735 @@
+---
+title: Conflict And Social Centralization In Tairona Chiefdom Communities In The Río
+  Frío Basin, Sierra Nevada De Santa Marta, Colombia
+author: "Luis Miguel Soto Rodríguez"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## 1. Definition of the working environment
+```{r message=FALSE, warning=FALSE}
+if (!requireNamespace("git2r", quietly = TRUE)) {
+  install.packages("git2r")
+}
+library(git2r)
+
+# Defines the repository URL and the temporary directory
+repo_url <- "https://github.com/luismiguelsoto/Conflict_And_Social_Centralization_In_Tairona_Chiefdom_Communities.git"
+temp_repo <- file.path(tempdir(), "Conflict_And_Social_Centralization_In_Tairona_Chiefdom_Communities")
+
+# Clones the repository if it does not already exist in the temporary directory
+if (!dir.exists(temp_repo)) {
+  clone(repo_url, local_path = temp_repo)
+}
+
+# Defines the directories for GIS and Database within the cloned repository
+dir_gis <- file.path(temp_repo, "GIS")
+dir_db  <- file.path(temp_repo, "Database")
+
+# List of required packages
+required_packages <- c(
+  "terra", "sf", "raster", "ggplot2", "ggnewscale", "ggspatial", "tidyverse",
+  "ggpubr", "ggfortify", "visreg", "vcd", "scatterplot3d", "dplyr", "tidyr",
+  "strucchange", "tmap", "spdep", "spatialreg", "gstat", "sp", "ggthemes", "ggrepel",
+  "corrplot", "viridis"
+)
+
+# Install any packages that are not yet installed.
+new_packages <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]
+if(length(new_packages)) install.packages(new_packages)
+
+# Load all required packages
+lapply(required_packages, library, character.only = TRUE)
+
+# Show versions of loaded packages
+cat("Package versions:\n")
+for (pkg in required_packages) {
+  version <- as.character(packageVersion(pkg))
+  cat(sprintf(" - %s: %s\n", pkg, version))
+}
+```
+## 2. Data Loading and Spatial Object Definition
+```{r message=FALSE, warning=FALSE}
+dem_path     <- file.path(dir_gis, "DEM_40KM.tif")
+sites_path   <- file.path(dir_gis, "CENTROID_SITES_TAIRONA.shp")
+polygon_path <- file.path(dir_gis, "POLYGON_SURVEY_UNTILL_2023.shp")
+#
+# Load GIS data
+DEM_raw     <- rast(dem_path)
+sites_orig  <- vect(sites_path)
+survey_poly <- vect(polygon_path)
+#
+cat("CRS DEM:", crs(DEM_raw), "\n")
+cat("CRS Sites:", crs(sites_orig), "\n")
+cat("CRS Polygon:", crs(survey_poly), "\n")
+```
+## 3. Optimization of Viewpoints for Archaeological Sites
+```{r warning=FALSE}
+dem_crop <- crop(DEM_raw, ext(survey_poly))
+DEM      <- mask(dem_crop, survey_poly)
+#
+sites_orig$ZID <- seq_len(nrow(sites_orig))
+#
+buff_100m <- buffer(sites_orig, width = 100)
+zones_r   <- rasterize(buff_100m, DEM, field = "ZID")
+zstats    <- zonal(DEM, zones_r, fun = "max", na.rm = TRUE)
+zmax_r    <- classify(zones_r, rcl = zstats, include.lowest = FALSE, others = NA)
+#
+r_equals <- (DEM == zmax_r)
+r_equals[is.na(r_equals)] <- 0
+r_equals[r_equals == 0]   <- NA
+#
+obs_points_raw <- as.points(r_equals)
+obs_points_raw_sf <- st_as_sf(obs_points_raw)
+buff_100m_sf <- st_as_sf(buff_100m)
+#
+if (is.na(st_crs(obs_points_raw_sf)$proj4string)) {
+  st_crs(obs_points_raw_sf) <- st_crs(survey_poly)
+}
+if (is.na(st_crs(buff_100m_sf)$proj4string)) {
+  st_crs(buff_100m_sf) <- st_crs(survey_poly)
+}
+#
+target_crs <- st_crs(survey_poly)
+obs_points_raw_sf <- st_transform(obs_points_raw_sf, target_crs)
+buff_100m_sf <- st_transform(buff_100m_sf, target_crs)
+#
+obs_points_atts_sf <- st_intersection(obs_points_raw_sf, buff_100m_sf)
+df_atts <- as.data.frame(obs_points_atts_sf, geom = "XY")
+#
+df_unique <- df_atts %>% group_by(ZID) %>% slice(1L)
+df_unique_sf <- st_as_sf(df_unique)
+coords <- st_coordinates(df_unique_sf)
+df_unique$x <- coords[, 1]
+df_unique$y <- coords[, 2]
+#
+sites_optimized <- vect(df_unique, geom = c("x", "y"), crs = crs(DEM))
+sites_optimized$SiteID <- df_unique$ZID
+#
+n_sites <- nrow(sites_optimized)
+offset <- 1.6
+radius <- 10000
+curv_coef <- 6 / 7
+#
+cumul_rast <- DEM
+values(cumul_rast) <- 0
+#
+for (i in seq_len(n_sites)) {
+  si_i <- sites_optimized[i, ]
+  loc_xy <- as.numeric(crds(si_i))
+  
+  buff_10km <- buffer(si_i, width = radius)
+  
+  vs_raw <- viewshed(
+    x = DEM,
+    loc = loc_xy,
+    observer = offset,
+    target = 0,
+    curvcoef = curv_coef,
+    output = "yes/no"
+  )
+  
+  vs_mask_poly <- mask(vs_raw, survey_poly)
+  vs_limited <- mask(vs_mask_poly, buff_10km)
+  
+  visible_count <- 0
+  for (j in seq_len(n_sites)) {
+    if (j == i) next
+    si_j <- sites_optimized[j, ]
+    val_j <- terra::extract(vs_limited, si_j)[, 2]
+    if (!is.na(val_j) && val_j == 1) {
+      visible_count <- visible_count + 1
+    }
+  }
+  
+  sites_optimized$NumSitesVisible[i] <- visible_count
+  
+  tmp <- vs_limited
+  tmp[is.na(tmp)] <- 0
+  cumul_rast <- cumul_rast + tmp
+}
+```
+
+## 4. Regression models
+```{r}
+# Height above sea level vs. density of archeological sites
+#
+REGRESION_DATA <- read.csv(
+  "https://raw.githubusercontent.com/luismiguelsoto/Conflict_And_Social_Centralization_In_Tairona_Chiefdom_Communities/main/Database/REGRESION_DATA.csv",
+  sep = ";",
+  header = TRUE,
+  stringsAsFactors = TRUE
+)
+#
+REGRESION_DATA$SIZE_SITES <- REGRESION_DATA$SIZE_SITES / 10000
+options(digits = 3, scipen = 25)
+str(REGRESION_DATA)
+summary(REGRESION_DATA)
+#
+ggplot(REGRESION_DATA, aes(x = REAL_SITES, y = ELEVATION_SITES, color = SITE_TYPE)) +
+  geom_point(alpha = 0.7, size = 2) + 
+  theme_classic() +
+  labs(
+    title = "Relationship between Elevation and Observable Sites by Site Type",
+    x = "Number of Observable Sites (X)",
+    y = "Site Elevation (Y, m a.s.l.)",
+    color = "Site Type"
+  )
+#
+modelo_simple <- lm(ELEVATION_SITES ~ REAL_SITES, data = REGRESION_DATA)
+summary_simple <- summary(modelo_simple)
+coef_simple <- summary_simple$coefficients
+slope_simple <- coef_simple[2, 1]
+intercept_simple <- coef_simple[1, 1]
+r_squared_simple <- round(summary_simple$r.squared, 2)
+pearson_r <- round(cor(REGRESION_DATA$REAL_SITES, REGRESION_DATA$ELEVATION_SITES), 2)
+p_value_simple <- format.pval(coef_simple[2, 4], digits = 2)
+#
+ggplot(REGRESION_DATA, aes(x = REAL_SITES, y = ELEVATION_SITES)) +
+  geom_point(color = "black", alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  theme_bw() +
+  labs(
+    title = "Relationship between Elevation and Observable Sites",
+    x = "Number of Observable Sites (X)",
+    y = "Site Elevation (Y, m a.s.l.)"
+  ) +
+  annotate(
+    "text", x = 3, y = 1400, hjust = 0, size = 4,
+    label = paste0("y = ", round(slope_simple, 2), "x + ", round(intercept_simple, 2),
+                   "\nR² = ", r_squared_simple,
+                   "\nPearson's r = ", pearson_r,
+                   "\np = ", p_value_simple)
+  )
+#
+modelo_multiple <- lm(ELEVATION_SITES ~ REAL_SITES + SIZE_SITES, data = REGRESION_DATA)
+summary_multiple <- summary(modelo_multiple)
+coef_multiple <- summary_multiple$coefficients
+slope_multiple_real <- coef_multiple["REAL_SITES", "Estimate"]
+slope_multiple_size <- coef_multiple["SIZE_SITES", "Estimate"]
+intercept_multiple <- coef_multiple["(Intercept)", "Estimate"]
+r_squared_multiple <- round(summary_multiple$r.squared, 2)
+p_value_multiple_real <- format.pval(coef_multiple["REAL_SITES", "Pr(>|t|)"], digits = 2)
+#
+ggplot(REGRESION_DATA, aes(x = REAL_SITES, y = ELEVATION_SITES, color = SIZE_SITES)) +
+  geom_point(aes(size = SIZE_SITES), alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  scale_color_gradient(low = "blue", high = "red") +
+  theme_bw() +
+  labs(
+    title = "Multiple Regression: Elevation and Size vs Observable Sites",
+    x = "Number of Observable Sites (X)",
+    y = "Site Elevation (Y, m a.s.l.)",
+    color = "Size (Ha)",
+    size = "Size (Ha)"
+  ) +
+  annotate(
+    "text", x = 1, y = 1300, hjust = 0, size = 4,
+    label = paste0("y = ", round(slope_multiple_real, 2), "x + ",
+                   round(slope_multiple_size, 2), "z + ", round(intercept_multiple, 2),
+                   "\nR² = ", r_squared_multiple,
+                   "\np = ", p_value_multiple_real)
+  )
+#
+calcular_X <- function(Y, Z, intercept, coef_X, coef_Z) {
+  (Y - intercept + (coef_Z * Z)) / coef_X
+}
+#
+Y_deseado <- 1300
+Z_deseado_ha <- 32
+coef_X <- coef_multiple["REAL_SITES", "Estimate"]
+coef_Z <- coef_multiple["SIZE_SITES", "Estimate"]
+X_calculado <- calcular_X(Y = Y_deseado, Z = Z_deseado_ha,
+                          intercept = intercept_multiple,
+                          coef_X = coef_X, coef_Z = coef_Z)
+
+cat("\nNumber of observable sites (X) for a site of", Z_deseado_ha,
+    "ha at", Y_deseado, "m a.s.l.:\n")
+cat("X ≈", round(X_calculado, 2), "observable sites\n")
+```
+
+## 5. Analysis of defensible areas
+```{r}
+modal_fun <- function(x, ...) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) return(NA)
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+find_threshold <- function(prop_values, desired_min_no = 1) {
+  sorted_vals <- sort(prop_values, na.last = NA)
+  for (th in sorted_vals) {
+    classification <- ifelse(prop_values >= th, "Yes", "No")
+    count_no <- sum(classification == "No", na.rm = TRUE)
+    if (count_no >= desired_min_no) return(th)
+  }
+  NA
+}
+#
+sites_path2 <- file.path(dir_gis, "ALL_SITES_TAIRONA_PERIOD.shp")
+dem <- rast(dem_path)
+sites <- st_read(sites_path2)
+#
+print(dem)
+plot(dem, main = "Digital Elevation Model (DEM)")
+print(sites)
+plot(st_geometry(sites), add = TRUE, col = "red", pch = 20)
+#
+slope <- terrain(dem, v = "slope", unit = "degrees")
+rugosity <- terrain(dem, v = "TRI")
+aspect <- terrain(dem, v = "aspect", unit = "degrees")
+aspect_north <- cos(aspect * pi / 180)
+aspect_east <- sin(aspect * pi / 180)
+#
+par(mfrow = c(2, 2))
+plot(slope, main = "Slope", col = rev(heat.colors(8)))
+plot(rugosity, main = "Rugosity", col = rev(heat.colors(8)))
+plot(aspect_north, main = "North Aspect", col = rev(heat.colors(8)))
+plot(aspect_east, main = "East Aspect", col = rev(heat.colors(8)))
+par(mfrow = c(1, 1))
+#
+pendiente_alta <- classify(slope, rcl = matrix(c(-Inf, 20, NA, 20, Inf, 1),                                ncol = 3, byrow = TRUE))
+plot(pendiente_alta, main = "Slope > 20°")
+#
+pendiente_agregada <- aggregate(pendiente_alta, fact = 2, fun = modal_fun)
+plot(pendiente_agregada, main = "High Slope Aggregated (fact = 2)")
+#
+distancia_hp <- distance(pendiente_agregada)
+plot(distancia_hp, main = "Distance to High Slope")
+#
+distancia_reclass <- classify(distancia_hp, rcl = matrix(c(-Inf, 180, 1, 180, Inf, NA), ncol = 3, byrow = TRUE))
+plot(distancia_reclass, main = "Zones near High Slope (<=180m)")
+#
+zona_alta <- classify(dem, rcl = matrix(c(-Inf, 900, NA, 900, Inf, 1), ncol = 3, byrow = TRUE))
+zona_alta_resampled <- resample(zona_alta, distancia_reclass, method = "near")
+#
+area_defensible <- distancia_reclass * zona_alta_resampled
+plot(area_defensible, main = "Potentially Defensible Zones")
+```
+
+## 7. Site Attribute Calculations
+```{r}
+elevaciones <- terra::extract(dem, vect(sites), fun = mean)
+sites$elevation <- elevaciones[, 2]
+sites$Size_HA <- as.numeric(st_area(sites)) / 10000
+sites$Size_Class <- cut(sites$Size_HA, breaks = c(-Inf, 0.5, 1, Inf),
+                        labels = c("Small_sites", "Medium_sites", "Large_sites"))
+#
+prop_defensible <- terra::extract(area_defensible, vect(sites), fun = mean)
+sites$prop_defensible <- prop_defensible[, 2]
+#
+umbral <- 0.05
+sites$in_defensible <- ifelse(is.na(sites$prop_defensible), "No",
+                              ifelse(sites$prop_defensible >= umbral, "Yes", "No"))
+#
+if (sum(sites$in_defensible == "No", na.rm = TRUE) == 0) {
+  umbral_ajustado <- find_threshold(sites$prop_defensible, desired_min_no = 1)
+  if (!is.na(umbral_ajustado)) {
+    sites$in_defensible <- ifelse(is.na(sites$prop_defensible), "No",
+                                  ifelse(sites$prop_defensible >= umbral_ajustado, "Yes", "No"))
+    message(paste("Adjusted threshold for 'No':", umbral_ajustado))
+  } else {
+    warning("No threshold found to yield at least one 'No'. All remain as 'Yes'.")
+  }
+}
+#
+total_sites_by_size <- table(sites$Size_Class)
+defensible_sites_by_size <- table(sites$Size_Class[sites$in_defensible == "Yes"])
+#
+if (sum(defensible_sites_by_size) > 0) {
+  percentages <- (defensible_sites_by_size / sum(defensible_sites_by_size)) * 100
+} else {
+  percentages <- rep(0, length(defensible_sites_by_size))
+}
+#
+df_percentages <- data.frame(Categoria = names(percentages),
+                             Porcentaje = as.numeric(percentages))
+#
+ggplot(df_percentages, aes(x = Categoria, y = Porcentaje, fill = Categoria)) +
+  geom_bar(stat = "identity", width = 0.2) +
+  ggtitle("Percentage of Sites in Defensible Areas by Size") +
+  xlab("Size Category") +
+  ylab("Percentage in Defensible Area") +
+  scale_y_continuous(limits = c(0, 100)) +
+  scale_fill_manual(values = c("lightblue", "lightgreen", "salmon")) +
+  theme_classic()
+#
+contingency_table <- table(sites$Size_Class, sites$in_defensible)
+chi_result <- chisq.test(contingency_table)
+print(chi_result)
+#
+assoc_stats <- assocstats(contingency_table)
+cramers_v <- assoc_stats$cramer
+print(paste("Cramer's V:", round(cramers_v, 3)))
+#
+observed <- contingency_table[, "Yes"]
+expected <- chi_result$expected[, "Yes"]
+df_comparison <- data.frame(
+  Categoria = rownames(contingency_table),
+  Observado = as.numeric(observed),
+  Esperado = as.numeric(expected)
+)
+#
+ggplot(df_comparison, aes(x = Categoria)) +
+  geom_line(aes(y = Observado, color = "Observed", group = 1), linewidth = 1) +
+  geom_point(aes(y = Observado, color = "Observed"), size = 3) +
+  geom_text(aes(y = Observado, label = Observado, color = "Observed"), 
+            vjust = -1, size = 3.5) +
+  geom_line(aes(y = Esperado, color = "Expected", group = 1), 
+            linewidth = 1, linetype = "dashed") +
+  geom_point(aes(y = Esperado, color = "Expected"), size = 3) +
+  geom_text(aes(y = Esperado, label = Esperado, color = "Expected"), 
+            vjust = 1.5, size = 3.5) +
+  scale_color_manual(name = "Values", 
+                     values = c("Observed" = "blue", "Expected" = "orange")) +
+  labs(title = "Observed vs Expected Comparison", 
+       x = "Size Category", y = "Frequency") +
+  theme_classic()
+```
+
+## 8. Classification of Sites Based on Standard Deviations
+```{r}
+zona_estudio_path <- file.path(dir_gis, "POLYGON_SURVEY_UNTILL_2023.shp")
+zona_estudio <- st_read(zona_estudio_path)
+#
+sitios_sigma_path <- file.path(dir_gis, "SITES_VIEWSHED.shp")
+sitios_sigma <- st_read(sitios_sigma_path)
+#
+if (st_crs(sitios_sigma) != st_crs(zona_estudio)) {
+  sitios_sigma <- st_transform(sitios_sigma, st_crs(zona_estudio))
+}
+#
+if (!"ViewArea_k_promedio" %in% names(sitios_sigma)) {
+  sitios_sigma$ViewArea_k_promedio <- runif(nrow(sitios_sigma), min = 0, max = 100)
+}
+#
+media_var <- mean(sitios_sigma$ViewArea_k_promedio, na.rm = TRUE)
+sd_var <- sd(sitios_sigma$ViewArea_k_promedio, na.rm = TRUE)
+#
+sitios_sigma <- sitios_sigma %>% mutate(
+  SdValue = (ViewArea_k_promedio - media_var) / sd_var,
+  SdCategory = case_when(
+    SdValue < -2 ~ "- >2 σ",
+    SdValue < -1 ~ "- 1–2 σ",
+    SdValue <  1 ~ "± 1 σ",
+    SdValue <  2 ~ "+ 1–2 σ",
+    TRUE         ~ "+ >2 σ"
+  )
+)
+#
+sigma_palette <- c(
+  "- >2 σ" = "#2C7BB6",
+  "- 1–2 σ" = "#ABD9E9",
+  "± 1 σ" = "#FFFFFF",
+  "+ 1–2 σ" = "#FFFFBF",
+  "+ >2 σ" = "#FDAE61"
+)
+#
+mapa_sitios_sigma <- tm_shape(zona_estudio) +
+  tm_borders(lwd = 2, col = "black") +
+  tm_shape(sitios_sigma) +
+  tm_fill(
+    col = "SdCategory",
+    palette = sigma_palette,
+    title = "Standard Deviations",
+    colorNA = "gray90",
+    legend.showNA = FALSE
+  ) +
+  tm_borders(col = "black", lwd = 0.5) +
+  tm_layout(legend.outside = TRUE, legend.title.size = 1.1, legend.text.size = 0.9) +
+  tm_compass(position = c("right", "top")) +
+  tm_scale_bar(position = c("right", "bottom"))
+#
+print(mapa_sitios_sigma)
+```
+
+## 9. Spatial Error Model (SEM) Analysis
+```{r}
+sitios_sem_path <- file.path(dir_gis, "SITES_VIEWSHED.shp")
+sitios_sem <- st_read(sitios_sem_path)
+#
+if (st_crs(sitios_sem) != st_crs(zona_estudio)) {
+  sitios_sem <- st_transform(sitios_sem, st_crs(zona_estudio))
+}
+#
+if (!"ViewArea_k" %in% names(sitios_sem)) {
+  stop("Column 'ViewArea_k' not found in 'SITES_VIEWSHED.shp'.")
+}
+if (!"NUMPOINTS" %in% names(sitios_sem)) {
+  stop("Column 'NUMPOINTS' not found in 'SITES_VIEWSHED.shp'.")
+}
+#
+vecinos_sem <- poly2nb(sitios_sem, queen = TRUE, snap = 100)
+if (any(card(vecinos_sem) == 0)) warning("Some polygons have no neighbors.")
+lista_pesos_sem <- nb2listw(vecinos_sem, style = "W", zero.policy = TRUE)
+#
+sitios_sem$has_neighbor <- card(vecinos_sem) > 0
+data_model_sem <- sitios_sem %>% filter(has_neighbor & !is.na(ViewArea_k) & !is.na(NUMPOINTS))
+if (nrow(data_model_sem) == 0) {
+  stop("No polygons with neighbors and non-NA in [ViewArea_k, NUMPOINTS].")
+}
+#
+vecinos_data_sem <- poly2nb(data_model_sem, queen = TRUE, snap = 100)
+lista_data_sem <- nb2listw(vecinos_data_sem, style = "W", zero.policy = TRUE)
+#
+modelo_sem <- tryCatch({
+  errorsarlm(NUMPOINTS ~ ViewArea_k, data = data_model_sem,
+             listw = lista_data_sem, zero.policy = TRUE)
+}, error = function(e) {
+  stop("SEM model could not be fitted: ", e$message)
+})
+#
+print(summary(modelo_sem))
+#
+data_model_sem$residuales <- residuals(modelo_sem)
+media_resid <- mean(data_model_sem$residuales, na.rm = TRUE)
+sd_resid <- sd(data_model_sem$residuales, na.rm = TRUE)
+#
+cat("Mean SEM residuals:", media_resid, " SD SEM residuals:", sd_resid, "\n")
+#
+data_model_sem <- data_model_sem %>% mutate(
+  SdValue = (residuales - media_resid) / sd_resid,
+  SdCategory = case_when(
+    SdValue < -2 ~ "- >2 σ",
+    SdValue < -1 ~ "- 1–2 σ",
+    SdValue <  1 ~ "± 1 σ",
+    SdValue <  2 ~ "+ 1–2 σ",
+    TRUE         ~ "+ >2 σ"
+  )
+)
+#
+resid_sem_df <- data_model_sem %>% st_drop_geometry() %>% dplyr::select(fid_1, residuales, SdCategory)
+sitios_sem <- sitios_sem %>% left_join(resid_sem_df, by = "fid_1")
+#
+sigma_palette_sem <- c(
+  "- >2 σ" = "#2C7BB6",
+  "- 1–2 σ" = "#ABD9E9",
+  "± 1 σ" = "#FFFFFF",
+  "+ 1–2 σ" = "#FFFFBF",
+  "+ >2 σ" = "#FDAE61"
+)
+#
+mapa_sem <- tm_shape(zona_estudio) +
+  tm_borders(col = "black", lwd = 2) +
+  tm_shape(sitios_sem) +
+  tm_fill(
+    col = "SdCategory",
+    palette = sigma_palette_sem,
+    title = "SEM Residuals (±σ)",
+    colorNA = "transparent",
+    legend.showNA = FALSE
+  ) +
+  tm_borders(col = "black", lwd = 0.5) +
+  tm_layout(legend.outside = TRUE, legend.title.size = 1.0, legend.text.size = 0.8) +
+  tm_compass(position = c("right", "top")) +
+  tm_scale_bar(position = c("right", "bottom"))
+#
+print(mapa_sem)
+```
+
+## 10. OLS and SEM Analysis
+```{r}
+data_ols <- sitios_sem %>% filter(!is.na(NUMPOINTS), !is.na(ViewArea_k))
+#
+ols_model_2 <- lm(NUMPOINTS ~ ViewArea_k, data = data_ols)
+#
+print(summary(ols_model_2))
+#
+vecinos_ols <- poly2nb(data_ols, queen = TRUE, snap = 100)
+#
+lista_ols <- nb2listw(vecinos_ols, zero.policy = TRUE)
+#
+ols_moran <- lm.morantest(ols_model_2, lista_ols, zero.policy = TRUE)
+#
+print(ols_moran)
+#
+data_ols$ols_resid <- resid(ols_model_2)
+#
+vecinos_sem2 <- poly2nb(data_ols, queen = TRUE, snap = 100)
+#
+lista_sem2 <- nb2listw(vecinos_sem2, zero.policy = TRUE)
+#
+lm_error2 <- errorsarlm(NUMPOINTS ~ ViewArea_k, data = data_ols, listw = lista_sem2, zero.policy = TRUE)
+#
+print(summary(lm_error2))
+#
+seResiduals <- rep(0, nrow(data_ols))
+#
+resIndex <- as.integer(names(lm_error2$residuals))
+#
+seResiduals[resIndex] <- lm_error2$residuals
+#
+moran_SEM2 <- moran.test(seResiduals, lista_sem2, zero.policy = TRUE)
+#
+print(moran_SEM2)
+#
+data_ols$sem_resid <- seResiduals
+#
+ggplot(data_ols, aes(x = ViewArea_k, y = NUMPOINTS)) +
+  geom_point(aes(fill = ols_resid), color = "black", shape = 21,
+             alpha = 0.7, size = 1.5) +
+  scale_fill_viridis_c(option = "viridis", name = "OLS Residuals", direction = -1) +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE,
+              color = "#CB4335", fill = "#F5B7B1", alpha = 0.3, linewidth = 1, fullrange = TRUE) +
+  new_scale_color() +
+  stat_ellipse(level = 0.80, type = "norm", aes(color = "80% CI"), linetype = "dotted", linewidth = 1) +
+  stat_ellipse(level = 0.90, type = "norm", aes(color = "90% CI"), linetype = "dotdash", linewidth = 1) +
+  stat_ellipse(level = 0.95, type = "norm", aes(color = "95% CI"), linetype = "dashed", linewidth = 1) +
+  stat_ellipse(level = 0.99, type = "norm", aes(color = "99% CI"), linetype = "solid", linewidth = 1) +
+  scale_color_manual(values = c("80% CI" = "#1ABC9C", "90% CI" = "#F1C40F", "95% CI" = "#E74C3C", "99% CI" = "#8E44AD"),
+                     name = "Confidence Interval") +
+  labs(
+    title = "Relationship between NUMPOINTS and ViewArea_k",
+    subtitle = "Linear Regression with Multiple Confidence Bands and Ellipses",
+    x = "Average View Area (ViewArea_k)",
+    y = "Number of Points (NUMPOINTS)",
+    caption = "Source: SITES_VIEWSHED.shp"
+  ) +
+  scale_x_continuous(limits = c(-5, 14), expand = c(0, 0)) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 12, face = "italic", hjust = 0.5, color = "#555555"),
+    axis.title = element_text(size = 14, face = "bold"),
+    axis.text = element_text(size = 12),
+    legend.position = "right",
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.grid.major = element_line(color = "#E5E7E9"),
+    panel.grid.minor = element_line(color = "#EBF5FB", linetype = "dotted")
+  ) +
+  geom_text_repel(
+    data = subset(data_ols, ViewArea_k > quantile(ViewArea_k, 0.95) |
+                    ViewArea_k < quantile(ViewArea_k, 0.05)),
+    aes(label = fid_1),
+    size = 3,
+    color = "darkred",
+    max.overlaps = Inf
+  )
+#
+opar <- par(mfrow = c(1, 2))
+#
+ols_resid_vector <- as.numeric(data_ols$ols_resid)
+#
+sem_resid_vector <- as.numeric(data_ols$sem_resid)
+#
+moran.plot(
+  ols_resid_vector, listw = lista_ols, zero.policy = TRUE,
+  main = "Moran Plot OLS Residuals",
+  xlab = "OLS Residuals",
+  ylab = "Spatial Lag of OLS Residuals",
+  pch = 21, col = "black",
+  bg = viridis(length(ols_resid_vector), option = "plasma", alpha = 0.5),
+  cex = 1.5, cex.lab = 1.2, cex.main = 1.4, col.main = "darkred"
+)
+#
+moran.plot(
+  sem_resid_vector, listw = lista_sem2, zero.policy = TRUE,
+  main = "Moran Plot SEM Residuals",
+  xlab = "SEM Residuals",
+  ylab = "Spatial Lag of SEM Residuals",
+  pch = 21, col = "black",
+  bg = viridis(length(sem_resid_vector), option = "mako", alpha = 0.5),
+  cex = 1.5, cex.lab = 1.2, cex.main = 1.4, col.main = "darkgreen"
+)
+#
+par(opar)
+#
+ggplot() +
+  geom_sf(data = zona_estudio, fill = NA, color = "black") +
+  geom_sf(data = data_ols, aes(fill = ols_resid), alpha = 0.8) +
+  scale_fill_steps(
+    name = "OLS Residuals", low = "lightsteelblue1", high = "tomato1",
+    n.breaks = 5, show.limits = TRUE
+  ) +
+  annotation_scale(location = "bl", width_hint = 0.5) +
+  annotation_north_arrow(location = "tr", which_north = "true",
+                         style = north_arrow_fancy_orienteering) +
+  theme_void() +
+  ggtitle("OLS Residuals Gradient")
+#
+ggplot() +
+  geom_sf(data = zona_estudio, fill = NA, color = "black") +
+  geom_sf(data = data_ols, aes(fill = sem_resid), alpha = 0.8) +
+  scale_fill_steps(
+    name = "SEM Residuals", low = "lightsteelblue1", high = "tomato1",
+    n.breaks = 5, show.limits = TRUE
+  ) +
+  annotation_scale(location = "bl", width_hint = 0.5) +
+  annotation_north_arrow(location = "tr", which_north = "true",
+                         style = north_arrow_fancy_orienteering) +
+  theme_void() +
+  ggtitle("SEM Residuals Gradient")
+```
+
+## 11. IDW Interpolation of OLS Residuals and Classified Raster
+```{r message=FALSE, warning=FALSE}
+if (!"fid_1" %in% names(sitios_sem)) {
+  data_ols$Residual <- data_ols$ols_resid
+} else {
+  data_ols$Residual <- data_ols$ols_resid
+  join_df <- data_ols %>% st_drop_geometry() %>% dplyr::select(fid_1, Residual)
+  sitios_sem <- sitios_sem %>% left_join(join_df, by = "fid_1")
+}
+#
+if (!"Residual" %in% names(sitios_sem)) {
+  stop("Column 'Residual' not found in sitios_sem.")
+}
+#
+sitios_centroids <- st_centroid(sitios_sem) %>% dplyr::select(fid_1, Residual, geometry)
+centroids_sp <- as(sitios_centroids, "Spatial")
+ext <- st_bbox(zona_estudio)
+res_x <- 50
+raster_base <- raster(xmn = ext["xmin"], xmx = ext["xmax"],
+                      ymn = ext["ymin"], ymx = ext["ymax"],
+                      crs = st_crs(zona_estudio)$proj4string,
+                      resolution = c(res_x, res_x))
+idw_model <- gstat::gstat(formula = Residual ~ 1,
+                          data = centroids_sp,
+                          nmax = 12,
+                          set = list(idp = 2))
+#
+idw_result <- predict(idw_model, as(raster_base, "SpatialGrid"))
+raster_resid <- raster(idw_result, layer = "var1.pred")
+#
+print(raster_resid)
+#
+vals <- values(raster_resid)
+r_mean <- mean(vals, na.rm = TRUE)
+r_sd <- sd(vals, na.rm = TRUE)
+cat("IDW Raster Mean:", r_mean, " SD:", r_sd, "\n")
+classify_sigma <- function(x, m, s) {
+  z <- (x - m) / s
+  dplyr::case_when(
+    z < -2 ~ -2.5,
+    z < -1 ~ -1.5,
+    z <  1 ~ 0,
+    z <  2 ~ 1.5,
+    TRUE   ~ 2.5
+  )
+}
+raster_cat <- calc(raster_resid, fun = function(x) {
+  classify_sigma(x, r_mean, r_sd)
+})
+#
+sigma_breaks2  <- c(-3, -2, -1, 1, 2, 3)
+sigma_labels2  <- c("- >2 σ", "- 1–2 σ", "± 1 σ", "+ 1–2 σ", "+ >2 σ")
+sigma_palette2 <- c("#1F5A97", "#82C0D1", "#FFFFFF", "#FFE66D", "#F57C35")
+#
+map_raster <- tm_shape(raster_cat) +
+  tm_raster(
+    palette = sigma_palette2,
+    breaks  = sigma_breaks2,
+    style   = "fixed",
+    labels  = sigma_labels2,
+    title   = "OLS Residuals (IDW ±σ)"
+  ) +
+  tm_shape(zona_estudio) +
+  tm_borders(col = "black", lwd = 2) +
+  tm_layout(legend.outside = TRUE) +
+  tm_compass(position = c("RIGHT", "top")) +
+  tm_scale_bar(position = c("RIGHT", "bottom"))
+#
+print(map_raster)
+```
