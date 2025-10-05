@@ -1,1 +1,7 @@
-
+#
+Greetings:
+#
+Here you will find the files in “.csv” format, containing the data sets used for conflict and social centralization analysis.
+#
+These files were initially written in an Excel® database in its 2010 version.
+#
