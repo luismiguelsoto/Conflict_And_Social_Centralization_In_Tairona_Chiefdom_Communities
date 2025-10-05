@@ -1,0 +1,720 @@
+---
+title: Conflict And Social Centralization In Tairona Chiefdom Communities In The Río
+  Frío Basin, Sierra Nevada De Santa Marta, Colombia
+author: "Luis Miguel Soto Rodríguez"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  html_document: default
+---
+
+## 1. Definition of the working environment
+```{r message=FALSE, warning=FALSE}
+if (!requireNamespace("git2r", quietly = TRUE)) {
+  install.packages("git2r")
+}
+library(git2r)
+repo_url <- "https://github.com/luismiguelsoto/Conflict_And_Social_Centralization_In_Tairona_Chiefdom_Communities.git"
+temp_repo <- file.path(tempdir(), "Conflict_And_Social_Centralization_In_Tairona_Chiefdom_Communities")
+if (!dir.exists(temp_repo)) {
+  clone(repo_url, local_path = temp_repo)
+}
+dir_gis <- file.path(temp_repo, "GIS")
+dir_db  <- file.path(temp_repo, "Database")
+required_packages <- c(
+  "terra","sf","raster","ggplot2","ggnewscale","ggspatial","tidyverse",
+  "ggpubr","ggfortify","visreg","vcd","scatterplot3d","dplyr","tidyr",
+  "strucchange","tmap","spdep","spatialreg","gstat","sp","ggthemes","ggrepel",
+  "corrplot","viridis","car","rstatix"
+)
+new_packages <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]
+if(length(new_packages)) install.packages(new_packages)
+lapply(required_packages, library, character.only = TRUE)
+```
+## 2. Data Loading and Spatial Object Definition
+```{r message=FALSE, warning=FALSE}
+dem_path     <- file.path(dir_gis, "DEM_UNTIL_2023.tif")
+sites_path   <- file.path(dir_gis, "CENTROID_SITES_TAIRONA.shp")
+polygon_path <- file.path(dir_gis, "POLYGON_SURVEY_UNTILL_2023.shp")
+DEM_raw     <- rast(dem_path)
+sites_orig  <- vect(sites_path)
+survey_poly <- vect(polygon_path)
+cat("CRS DEM:", crs(DEM_raw), "\n")
+cat("CRS Sites:", crs(sites_orig), "\n")
+cat("CRS Polygon:", crs(survey_poly), "\n")
+```
+## 3. Optimization of Viewpoints for Archaeological Sites
+```{r warning=FALSE}
+dem_crop <- crop(DEM_raw, ext(survey_poly))
+DEM      <- mask(dem_crop, survey_poly)
+
+sites_orig$ZID <- seq_len(nrow(sites_orig))
+
+buff_100m <- buffer(sites_orig, width = 100)
+zones_r   <- rasterize(buff_100m, DEM, field = "ZID")
+zstats    <- zonal(DEM, zones_r, fun = "max", na.rm = TRUE)
+zmax_r    <- classify(zones_r, rcl = zstats, include.lowest = FALSE, others = NA)
+
+r_equals <- (DEM == zmax_r)
+r_equals[is.na(r_equals)] <- 0
+r_equals[r_equals == 0]   <- NA
+
+obs_points_raw <- as.points(r_equals)
+obs_points_raw_sf <- st_as_sf(obs_points_raw)
+buff_100m_sf <- st_as_sf(buff_100m)
+
+if (is.na(st_crs(obs_points_raw_sf)$proj4string)) {
+  st_crs(obs_points_raw_sf) <- st_crs(survey_poly)
+}
+if (is.na(st_crs(buff_100m_sf)$proj4string)) {
+  st_crs(buff_100m_sf) <- st_crs(survey_poly)
+}
+
+target_crs <- st_crs(survey_poly)
+obs_points_raw_sf <- st_transform(obs_points_raw_sf, target_crs)
+buff_100m_sf <- st_transform(buff_100m_sf, target_crs)
+
+obs_points_atts_sf <- st_intersection(obs_points_raw_sf, buff_100m_sf)
+df_atts <- as.data.frame(obs_points_atts_sf, geom = "XY")
+
+df_unique <- df_atts %>% group_by(ZID) %>% slice(1L)
+df_unique_sf <- st_as_sf(df_unique)
+coords <- st_coordinates(df_unique_sf)
+df_unique$x <- coords[, 1]
+df_unique$y <- coords[, 2]
+
+sites_optimized <- vect(df_unique, geom = c("x", "y"), crs = crs(DEM))
+sites_optimized$SiteID <- df_unique$ZID
+
+n_sites <- nrow(sites_optimized)
+offset <- 1.6
+radius <- 10000
+curv_coef <- 6 / 7
+
+cumul_rast <- DEM
+values(cumul_rast) <- 0
+
+for (i in seq_len(n_sites)) {
+  si_i <- sites_optimized[i, ]
+  loc_xy <- as.numeric(crds(si_i))
+  
+  buff_10km <- buffer(si_i, width = radius)
+  
+  vs_raw <- viewshed(
+    x = DEM,
+    loc = loc_xy,
+    observer = offset,
+    target = 0,
+    curvcoef = curv_coef,
+    output = "yes/no"
+  )
+  
+  vs_mask_poly <- mask(vs_raw, survey_poly)
+  vs_limited <- mask(vs_mask_poly, buff_10km)
+  
+  visible_count <- 0
+  for (j in seq_len(n_sites)) {
+    if (j == i) next
+    si_j <- sites_optimized[j, ]
+    val_j <- terra::extract(vs_limited, si_j)[, 2]
+    if (!is.na(val_j) && val_j == 1) {
+      visible_count <- visible_count + 1
+    }
+  }
+  
+  sites_optimized$NumSitesVisible[i] <- visible_count
+  
+  tmp <- vs_limited
+  tmp[is.na(tmp)] <- 0
+  cumul_rast <- cumul_rast + tmp
+}
+```
+
+## 4. Regression models
+```{r}
+REGRESION_DATA <- read.csv(
+  "https://raw.githubusercontent.com/luismiguelsoto/Conflict_And_Social_Centralization_In_Tairona_Chiefdom_Communities/main/Database/REGRESION_DATA.csv",
+  sep = ";",
+  header = TRUE,
+  stringsAsFactors = TRUE
+)
+#
+REGRESION_DATA$SIZE_SITES <- REGRESION_DATA$SIZE_SITES / 10000
+options(digits = 3, scipen = 25)
+str(REGRESION_DATA)
+summary(REGRESION_DATA)
+#
+ggplot(REGRESION_DATA, aes(x = REAL_SITES, y = ELEVATION_SITES, color = SITE_TYPE)) +
+  geom_point(alpha = 0.7, size = 2) + 
+  theme_classic() +
+  labs(
+    title = "Relationship between Elevation and Observable Sites by Site Type",
+    x = "Number of Observable Sites (X)",
+    y = "Site Elevation (Y, m a.s.l.)",
+    color = "Site Type"
+  )
+#
+modelo_simple <- lm(ELEVATION_SITES ~ REAL_SITES, data = REGRESION_DATA)
+summary_simple <- summary(modelo_simple)
+coef_simple <- summary_simple$coefficients
+slope_simple <- coef_simple[2, 1]
+intercept_simple <- coef_simple[1, 1]
+r_squared_simple <- round(summary_simple$r.squared, 2)
+pearson_r <- round(cor(REGRESION_DATA$REAL_SITES, REGRESION_DATA$ELEVATION_SITES), 2)
+p_value_simple <- format.pval(coef_simple[2, 4], digits = 2)
+#
+ggplot(REGRESION_DATA, aes(x = REAL_SITES, y = ELEVATION_SITES)) +
+  geom_point(color = "black", alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  theme_bw() +
+  labs(
+    title = "Relationship between Elevation and Observable Sites",
+    x = "Number of Observable Sites (X)",
+    y = "Site Elevation (Y, m a.s.l.)"
+  ) +
+  annotate(
+    "text", x = 3, y = 1400, hjust = 0, size = 4,
+    label = paste0("y = ", round(slope_simple, 2), "x + ", round(intercept_simple, 2),
+                   "\nR² = ", r_squared_simple,
+                   "\nPearson's r = ", pearson_r,
+                   "\np = ", p_value_simple)
+  )
+#
+modelo_multiple <- lm(ELEVATION_SITES ~ REAL_SITES + SIZE_SITES, data = REGRESION_DATA)
+summary_multiple <- summary(modelo_multiple)
+coef_multiple <- summary_multiple$coefficients
+slope_multiple_real <- coef_multiple["REAL_SITES", "Estimate"]
+slope_multiple_size <- coef_multiple["SIZE_SITES", "Estimate"]
+intercept_multiple <- coef_multiple["(Intercept)", "Estimate"]
+r_squared_multiple <- round(summary_multiple$r.squared, 2)
+p_value_multiple_real <- format.pval(coef_multiple["REAL_SITES", "Pr(>|t|)"], digits = 2)
+#
+ggplot(REGRESION_DATA, aes(x = REAL_SITES, y = ELEVATION_SITES, color = SIZE_SITES)) +
+  geom_point(aes(size = SIZE_SITES), alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  scale_color_gradient(low = "blue", high = "red") +
+  theme_bw() +
+  labs(
+    title = "Multiple Regression: Elevation and Size vs Observable Sites",
+    x = "Number of Observable Sites (X)",
+    y = "Site Elevation (Y, m a.s.l.)",
+    color = "Size (Ha)",
+    size = "Size (Ha)"
+  ) +
+  annotate(
+    "text", x = 1, y = 1300, hjust = 0, size = 4,
+    label = paste0("y = ", round(slope_multiple_real, 2), "x + ",
+                   round(slope_multiple_size, 2), "z + ", round(intercept_multiple, 2),
+                   "\nR² = ", r_squared_multiple,
+                   "\np = ", p_value_multiple_real)
+  )
+#
+dat3d <- model.frame(modelo_multiple)
+x <- dat3d$REAL_SITES
+z <- dat3d$SIZE_SITES
+y <- dat3d$ELEVATION_SITES
+fit <- fitted(modelo_multiple)
+res <- y - fit
+#
+oldpar <- par(no.readonly = TRUE)
+on.exit(par(oldpar))
+par(family = "sans")
+#
+s3d <- scatterplot3d(
+  x, z, y,
+  pch = 16,
+  color = adjustcolor("grey40", 0.7),
+  type = "p",
+  main = "Regression Plane",
+  xlab = "Number of observable sites (X)",
+  ylab = "Size (Ha)",
+  zlab = "Height (masl) of sites",
+  angle = 80,
+  grid  = TRUE,
+  box   = TRUE,
+  mar   = c(3.2, 3.2, 2.5, 1.5)
+)
+#
+s3d$plane3d(
+  modelo_multiple,
+  draw_polygon = TRUE,
+  draw_lines   = TRUE,
+  polygon_args = list(col = rgb(0.2, 0.8, 1, 0.45), border = NA)  # celeste
+)
+#
+p_obs <- s3d$xyz.convert(x, z, y)
+p_fit <- s3d$xyz.convert(x, z, fit)
+segments(p_obs$x, p_obs$y, p_fit$x, p_fit$y,
+         col = "red", lwd = 1.4, lty = 2)
+#
+s3d$points3d(x, z, y, pch = 21, bg = "black", col = "black", cex = 0.9)
+#
+s3d$points3d(x, z, fit, pch = 16, col = adjustcolor("grey35", 0.6), cex = 0.6)
+#
+cat(
+  sprintf("3D model: Y = %.3f + %.3f·X + %.3f·Z | R² = %.3f | n = %d\n",
+          coef(modelo_multiple)[1],
+          coef(modelo_multiple)["REAL_SITES"],
+          coef(modelo_multiple)["SIZE_SITES"],
+          summary(modelo_multiple)$r.squared,
+          nrow(dat3d))
+)
+#
+calcular_X <- function(Y, Z, intercept, coef_X, coef_Z) {
+  (Y - intercept + (coef_Z * Z)) / coef_X
+}
+#
+Y_deseado <- 1300
+Z_deseado_ha <- 32
+coef_X <- coef_multiple["REAL_SITES", "Estimate"]
+coef_Z <- coef_multiple["SIZE_SITES", "Estimate"]
+X_calculado <- calcular_X(Y = Y_deseado, Z = Z_deseado_ha,
+                          intercept = intercept_multiple,
+                          coef_X = coef_X, coef_Z = coef_Z)
+#
+cat("\nNumber of observable sites (X) for a site of", Z_deseado_ha,
+    "ha at", Y_deseado, "m a.s.l.:\n")
+cat("X ≈", round(X_calculado, 2), "observable sites\n")
+```
+
+## 5. Analysis of defensible areas
+```{r}
+modal_fun <- function(x, ...) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) return(NA)
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+find_threshold <- function(prop_values, desired_min_no = 1) {
+  sorted_vals <- sort(prop_values, na.last = NA)
+  for (th in sorted_vals) {
+    classification <- ifelse(prop_values >= th, "Yes", "No")
+    count_no <- sum(classification == "No", na.rm = TRUE)
+    if (count_no >= desired_min_no) return(th)
+  }
+  NA
+}
+#
+sites_path2 <- file.path(dir_gis, "ALL_SITES_TAIRONA_PERIOD.shp")
+dem <- rast(dem_path)
+sites <- st_read(sites_path2)
+#
+print(dem)
+plot(dem, main = "Digital Elevation Model (DEM)")
+print(sites)
+plot(st_geometry(sites), add = TRUE, col = "red", pch = 20)
+#
+slope <- terrain(dem, v = "slope", unit = "degrees")
+rugosity <- terrain(dem, v = "TRI")
+aspect <- terrain(dem, v = "aspect", unit = "degrees")
+aspect_north <- cos(aspect * pi / 180)
+aspect_east <- sin(aspect * pi / 180)
+#
+par(mfrow = c(2, 2))
+plot(slope, main = "Slope", col = rev(heat.colors(8)))
+plot(rugosity, main = "Rugosity", col = rev(heat.colors(8)))
+plot(aspect_north, main = "North Aspect", col = rev(heat.colors(8)))
+plot(aspect_east, main = "East Aspect", col = rev(heat.colors(8)))
+par(mfrow = c(1, 1))
+#
+pendiente_alta <- classify(slope, rcl = matrix(c(-Inf, 20, NA, 20, Inf, 1),                                ncol = 3, byrow = TRUE))
+plot(pendiente_alta, main = "Slope > 20°")
+#
+pendiente_agregada <- aggregate(pendiente_alta, fact = 2, fun = modal_fun)
+plot(pendiente_agregada, main = "High Slope Aggregated (fact = 2)")
+#
+distancia_hp <- distance(pendiente_agregada)
+plot(distancia_hp, main = "Distance to High Slope")
+#
+distancia_reclass <- classify(distancia_hp, rcl = matrix(c(-Inf, 180, 1, 180, Inf, NA), ncol = 3, byrow = TRUE))
+plot(distancia_reclass, main = "Zones near High Slope (<=180m)")
+#
+zona_alta <- classify(dem, rcl = matrix(c(-Inf, 900, NA, 900, Inf, 1), ncol = 3, byrow = TRUE))
+zona_alta_resampled <- resample(zona_alta, distancia_reclass, method = "near")
+#
+area_defensible <- distancia_reclass * zona_alta_resampled
+plot(area_defensible, main = "Potentially Defensible Zones")
+```
+
+## 6. Lines of Sight (LOS): EDA, Welch ANOVA y post-hoc
+```{r}
+los_path <- file.path(dir_db, "LINES_OF_SIGHT_TYPE_SITES.csv")
+out_dir  <- file.path(dir_db, "outputs")
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+suppressWarnings({
+  LOS <- tryCatch(
+    {
+      readr::read_delim(los_path, delim = ";",
+                        locale = readr::locale(decimal_mark = ","), show_col_types = FALSE)
+    },
+    error = function(e) {
+      readr::read_delim(los_path, delim = ";",
+                        locale = readr::locale(decimal_mark = "."), show_col_types = FALSE)
+    }
+  )
+})
+
+names(LOS) <- gsub("\\s+", "_", names(LOS))
+
+cand_len <- intersect(tolower(names(LOS)), c("length","longitud","length_km","km","dist_km"))
+stopifnot("No encuentro columna de longitudes (Length/Longitud/Length_km)." = length(cand_len) >= 1)
+len_col <- names(LOS)[match(cand_len[1], tolower(names(LOS)))]
+LOS[[len_col]] <- suppressWarnings(as.numeric(LOS[[len_col]]))
+
+cand_grp <- intersect(tolower(names(LOS)), c("source","sourcetype","sitetype","type","grupo"))
+stopifnot("No encuentro columna de grupos (Source/SiteType/Type)." = length(cand_grp) >= 1)
+grp_col <- names(LOS)[match(cand_grp[1], tolower(names(LOS)))]
+
+LOS <- LOS %>% filter(!is.na(.data[[len_col]])) %>% mutate(!!grp_col := as.factor(.data[[grp_col]]))
+
+desc_stats <- LOS %>%
+  group_by(.data[[grp_col]]) %>%
+  summarise(
+    n = dplyr::n(),
+    mean   = mean(.data[[len_col]], na.rm = TRUE),
+    median = median(.data[[len_col]], na.rm = TRUE),
+    sd     = sd(.data[[len_col]], na.rm = TRUE),
+    IQR    = IQR(.data[[len_col]], na.rm = TRUE),
+    min    = min(.data[[len_col]], na.rm = TRUE),
+    max    = max(.data[[len_col]], na.rm = TRUE),
+    .groups = "drop"
+  ) %>% mutate(across(where(is.numeric), ~round(., 3)))
+
+readr::write_csv(desc_stats, file.path(out_dir, "LOS_descriptivos.csv"))
+print(desc_stats)
+
+ggpubr::ggqqplot(LOS, x = len_col, facet.by = grp_col) +
+  labs(title = "Q–Q por grupo (Lines of Sight)")
+
+print(car::leveneTest(stats::as.formula(paste(len_col, "~", grp_col)), data = LOS))
+
+anova_welch <- rstatix::welch_anova_test(LOS, stats::as.formula(paste(len_col, "~", grp_col)))
+print(anova_welch)
+
+posthoc_GH <- rstatix::games_howell_test(LOS, stats::as.formula(paste(len_col, "~", grp_col))) %>%
+  mutate(p.adj = round(p.adj, 4))
+readr::write_csv(posthoc_GH, file.path(out_dir, "LOS_posthoc_GH.csv"))
+print(posthoc_GH)
+
+eta_sq <- anova_welch %>%
+  mutate(eta.squared = round((statistic * DFn) / (statistic * DFn + DFd), 3)) %>%
+  dplyr::select(eta.squared)
+print(eta_sq)
+
+epsilon_sq <- rstatix::kruskal_effsize(LOS, stats::as.formula(paste(len_col, "~", grp_col))) %>%
+  transmute(epsilon.squared = round(effsize, 3))
+print(epsilon_sq)
+```
+
+## 7. Site Attribute Calculations
+```{r}
+elevaciones <- terra::extract(dem, vect(sites), fun = mean)
+sites$elevation <- elevaciones[, 2]
+sites$Size_HA <- as.numeric(st_area(sites)) / 10000
+sites$Size_Class <- cut(sites$Size_HA, breaks = c(-Inf, 0.5, 1, Inf),
+                        labels = c("Small_sites", "Medium_sites", "Large_sites"))
+
+prop_defensible <- terra::extract(area_defensible, vect(sites), fun = mean)
+sites$prop_defensible <- prop_defensible[, 2]
+
+umbral <- 0.05
+sites$in_defensible <- ifelse(is.na(sites$prop_defensible), "No",
+                              ifelse(sites$prop_defensible >= umbral, "Yes", "No"))
+if (sum(sites$in_defensible == "No", na.rm = TRUE) == 0) {
+  umbral_ajustado <- find_threshold(sites$prop_defensible, desired_min_no = 1)
+  if (!is.na(umbral_ajustado)) {
+    sites$in_defensible <- ifelse(is.na(sites$prop_defensible), "No",
+                                  ifelse(sites$prop_defensible >= umbral_ajustado, "Yes", "No"))
+    message(paste("Adjusted threshold for 'No':", umbral_ajustado))
+  } else {
+    warning("No threshold found to yield at least one 'No'. All remain as 'Yes'.")
+  }
+}
+
+total_sites_by_size <- table(sites$Size_Class)
+defensible_sites_by_size <- table(sites$Size_Class[sites$in_defensible == "Yes"])
+
+if (sum(defensible_sites_by_size) > 0) {
+  percentages <- (defensible_sites_by_size / sum(defensible_sites_by_size)) * 100
+} else {
+  percentages <- rep(0, length(defensible_sites_by_size))
+}
+
+df_percentages <- data.frame(Categoria = names(percentages),
+                             Porcentaje = as.numeric(percentages))
+ggplot(df_percentages, aes(x = Categoria, y = Porcentaje, fill = Categoria)) +
+  geom_bar(stat = "identity", width = 0.2) +
+  ggtitle("Percentage of Sites in Defensible Areas by Size") +
+  xlab("Size Category") +
+  ylab("Percentage in Defensible Area") +
+  scale_y_continuous(limits = c(0, 100)) +
+  scale_fill_manual(values = c("lightblue", "lightgreen", "salmon")) +
+  theme_classic()
+
+contingency_table <- table(sites$Size_Class, sites$in_defensible)
+chi_result <- chisq.test(contingency_table)
+print(chi_result)
+
+assoc_stats <- assocstats(contingency_table)
+cramers_v <- assoc_stats$cramer
+print(paste("Cramer's V:", round(cramers_v, 3)))
+
+observed <- contingency_table[, "Yes"]
+expected <- chi_result$expected[, "Yes"]
+df_comparison <- data.frame(
+  Categoria = rownames(contingency_table),
+  Observado = as.numeric(observed),
+  Esperado = as.numeric(expected)
+)
+
+ggplot(df_comparison, aes(x = Categoria)) +
+  geom_line(aes(y = Observado, color = "Observed", group = 1), linewidth = 1) +
+  geom_point(aes(y = Observado, color = "Observed"), size = 3) +
+  geom_text(aes(y = Observado, label = Observado, color = "Observed"), 
+            vjust = -1, size = 3.5) +
+  geom_line(aes(y = Esperado, color = "Expected", group = 1), 
+            linewidth = 1, linetype = "dashed") +
+  geom_point(aes(y = Esperado, color = "Expected"), size = 3) +
+  geom_text(aes(y = Esperado, label = Esperado, color = "Expected"), 
+            vjust = 1.5, size = 3.5) +
+  scale_color_manual(name = "Values", 
+                     values = c("Observed" = "blue", "Expected" = "orange")) +
+  labs(title = "Observed vs Expected Comparison", 
+       x = "Size Category", y = "Frequency") +
+  theme_classic()
+```
+
+## 8. Structural Change and Baseline Comparison Analysis
+```{r}
+bootstrap_median_narrow <- function(x, n_bootstrap = 10000, conf_level = 0.80) {
+  boot_medians <- replicate(n_bootstrap, median(sample(x, replace = TRUE)))
+  lower <- quantile(boot_medians, (1 - conf_level) / 2)
+  upper <- quantile(boot_medians, 1 - (1 - conf_level) / 2)
+  median_value <- median(boot_medians)
+  return(data.frame(median = median_value, lower = lower, upper = upper))
+}
+
+real_sites_plot <- c(73, 51, 55, 126, 40, 51, 41, 49, 24, 60, 94, 35, 122, 147, 32, 115, 71, 111, 124, 49)
+random_sites_plot <- c(
+  1, 46, 113, 19, 22, 24, 8, 9, 0, 39, 43, 54, 39, 22, 0, 6, 77, 62, 92, 47, 40, 25, 16, 47, 71, 45, 4, 52, 39, 100,
+  69, 11, 2, 77, 52, 4, 40, 101, 36, 29, 57, 112, 12, 29, 19, 7, 19, 145, 89, 64, 59, 107, 42, 60, 159, 68, 1, 32, 22,
+  159, 42, 85, 156, 52, 10, 72, 52, 29, 54, 136, 20, 66, 67, 25, 18, 21, 48, 24, 136, 33, 4, 52, 26, 127, 73, 57, 6,
+  23, 58, 1, 0, 52, 41, 2, 42, 41, 49, 41, 10, 31, 45, 42, 57, 55, 39, 55, 47, 67, 125, 164, 154, 59, 0, 7, 1, 47, 60,
+  44, 61, 38, 74, 106, 66, 3, 16, 43, 27, 23, 51, 153, 75, 43, 15, 22, 80, 58, 46, 58, 114, 36, 53, 25, 59, 13, 32, 157,
+  0, 69, 45, 36, 41, 64, 39, 44, 113, 8, 24, 71, 119, 119, 14, 156, 63, 45, 63, 98, 1, 45, 54, 130, 30, 101, 51, 124,
+  151, 67, 98, 45, 86, 38, 63, 26, 5, 53, 33, 17, 33, 93, 38, 17, 30, 48, 2, 60, 73, 23, 12, 0, 28, 65, 44, 149, 135,
+  27, 30, 125, 58, 132, 39, 123, 45, 26, 113, 26, 44, 122, 109, 32, 3, 68, 17, 55, 57, 14, 51, 37, 11, 50, 74, 23, 10,
+  146, 46, 19, 34, 79, 72, 3, 35, 32, 4, 43, 49, 49, 28, 85, 46, 35, 12, 111, 2, 45, 77, 36, 10, 1, 42, 58, 162, 2, 21,
+  36, 2, 136, 62, 3, 11, 79, 34, 75, 93, 2, 0, 74, 53, 11, 51, 128, 65, 46, 44, 7, 15, 160, 10, 15, 29, 6, 22, 0, 42,
+  106, 65, 74, 17, 8, 21, 10, 17, 18, 95, 47, 55, 25, 51, 28, 61, 22, 33, 88, 37, 56, 59, 24, 8, 70, 2, 4, 16, 63, 0, 56,
+  24, 35, 108, 94, 42, 73, 17, 89, 84, 41, 74, 8, 55, 6, 82, 131, 45, 77, 41, 8, 4, 43, 90, 9, 134, 1, 101, 29, 10, 4,
+  34, 144
+)
+
+random_sites_long <- data.frame(
+  sites_visible = rep(1:20, length.out = length(random_sites_plot)),
+  Random_Sites = random_sites_plot
+)
+
+summary_random_sites <- random_sites_long %>%
+  group_by(sites_visible) %>%
+  summarise(
+    Bootstrap_Results = list(bootstrap_median_narrow(Random_Sites)),
+    .groups = "drop"
+  ) %>%
+  unnest(cols = c(Bootstrap_Results))
+
+data <- data.frame(
+  sites_visible = 1:20,
+  Real_Sites = real_sites_plot
+) %>%
+  left_join(summary_random_sites, by = "sites_visible")
+
+ggplot(data, aes(x = sites_visible)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "lightblue", alpha = 0.3) +
+  geom_line(aes(y = median, color = "Random Sites"), linewidth = 1) +
+  geom_point(aes(y = median, color = "Random Sites"), size = 2) +
+  geom_line(aes(y = Real_Sites, color = "Real Sites"), linewidth = 1) +
+  geom_point(aes(y = Real_Sites, color = "Real Sites"), size = 2) +
+  scale_color_manual(values = c("Random Sites" = "blue", "Real Sites" = "red")) +
+  labs(
+    title = "Site Density with Bootstrap Confidence Interval",
+    x = "Sites Visible",
+    y = "Frequency (sites)",
+    color = ""
+  ) +
+  theme_classic() +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+real_sites_cusum <- c(73, 51, 55, 126, 40, 51, 41, 49, 24, 60, 94, 35, 122, 147, 32, 115, 71, 111, 124, 49, 124, 112, 77, 99, 121, 139, 36, 120, 120, 26, 14, 24, 43, 36, 35, 25, 31, 15, 36, 0, 110, 99, 71, 27, 18, 24, 10, 21, 32, 31, 11, 5, 85, 66, 24, 39, 39, 2, 53, 39, 53, 70, 41, 36, 33, 32, 103, 19, 19, 3, 84, 85, 91, 91, 65, 68, 50, 31, 61, 80, 96, 97, 102, 75, 68, 82, 53, 76, 97, 68, 58, 70, 49, 42, 86, 66, 70, 93, 43, 80, 46, 92, 104, 93, 64, 81, 53, 94, 59, 63, 120, 97, 141, 70, 105, 99, 158, 43, 127, 149, 77, 157, 146, 88, 107, 151, 135, 136, 147, 120, 149, 115, 128, 67, 126, 130, 135, 129, 117, 129, 130, 88, 114, 46, 78, 63, 60, 61, 64, 66, 52, 57, 89, 92, 82, 46, 65, 62, 61, 80, 76, 76, 55, 110, 94, 80, 59, 81, 88, 43, 40, 99, 76, 89, 94, 81, 88, 51, 30, 72, 35, 107, 82, 82, 123, 115, 115, 46, 36, 41, 138, 57, 96, 122, 61, 78, 128, 124, 36, 117, 120, 40, 41, 81, 25, 24, 41, 19, 24, 41, 0, 8, 25, 34, 31, 31, 18, 18, 37, 37, 38, 41, 42, 38, 20, 8, 49, 71, 99, 88, 31, 36, 20, 4, 2, 5, 5, 8, 47, 58, 128, 63, 72, 88, 130, 68, 132, 38, 33, 32, 44, 33, 53, 29, 33, 10, 51, 64, 44, 57, 91, 86, 68, 44, 66, 72, 75, 72, 80, 73, 65, 79, 66, 6, 87, 11, 39, 34, 34, 22, 22, 11, 0, 69, 114, 129, 142, 20, 31, 27, 23, 27, 31, 85, 105, 126, 36, 33, 35, 34, 32, 69, 18, 26, 19, 47, 57, 9, 9, 2, 9, 57, 13, 85, 8, 80, 84, 102, 84, 93, 89, 74, 79, 101, 94, 122, 68, 84, 125, 77, 108, 130, 114, 100, 110, 59, 112, 50, 27, 5, 68, 56, 61, 48, 78, 90, 20, 20, 15, 22, 22, 25, 31, 43)
+
+cusum_test <- efp(real_sites_cusum ~ 1, type = "OLS-CUSUM")
+
+plot(
+  cusum_test,
+  main = "Unified CUSUM Test Visualization",
+  xlab = "Index",
+  ylab = "Cumulative Sum",
+  col = "blue",
+  lwd = 2,
+  boundary = FALSE,
+  ylim = c(-3.5, 3.5)
+)
+
+abline(h = 0, col = "red", lty = 2)
+abline(h = c(1.96, -1.96), col = "darkgreen", lty = 2, lwd = 1.5)
+text(x = 0.1, y = 2.2, labels = "Upper Limit", pos = 4, col = "black")
+text(x = 0.1, y = -2.2, labels = "Lower Limit", pos = 4, col = "black")
+
+polygon(
+  c(0, 1, 1, 0),
+  c(1.96, 1.96, 3.5, 3.5),
+  col = rgb(0, 1, 0, 0.1),
+  border = NA
+)
+polygon(
+  c(0, 1, 1, 0),
+  c(-1.96, -1.96, -3.5, -3.5),
+  col = rgb(1, 0, 0, 0.1),
+  border = NA
+)
+
+change_points_locations <- c(0.3, 0.58)
+
+abline(v = change_points_locations, col = "purple", lty = 2, lwd = 1.5)
+
+text(x = change_points_locations[1], y = -1, labels = "Change Point", col = "purple", pos = 4)
+text(x = change_points_locations[2], y = 2.9, labels = "Change Point", col = "purple", pos = 2)
+```
+
+## 9. Classification of Sites Based on Standard Deviations
+```{r}
+study_area_path <- file.path(dir_gis, "POLYGON_SURVEY_UNTILL_2023.shp")
+sites_path      <- file.path(dir_gis, "SITES_VIEWSHED.shp")
+
+study_area <- sf::st_read(study_area_path, quiet = TRUE)
+sites      <- sf::st_read(sites_path, quiet = TRUE)
+
+if (sf::st_crs(sites) != sf::st_crs(study_area)) {
+  sites <- sf::st_transform(sites, sf::st_crs(study_area))
+}
+
+sem_data <- sites |>
+  dplyr::filter(!is.na(ViewArea_k), !is.na(NUMPOINTS))
+
+neighbors    <- spdep::poly2nb(sem_data, queen = TRUE, snap = 100)
+weights_list <- spdep::nb2listw(neighbors, style = "W", zero.policy = TRUE)
+
+sem_model <- spatialreg::errorsarlm(
+  NUMPOINTS ~ ViewArea_k, data = sem_data,
+  listw = weights_list, zero.policy = TRUE
+)
+
+sem_data$sem_residuals <- residuals(sem_model)
+
+p1 <- ggplot2::ggplot() +
+  ggspatial::annotation_scale(location = "bl", width_hint = 0.3) +
+  ggspatial::annotation_north_arrow(
+    location = "tr", which_north = "true",
+    style = ggspatial::north_arrow_fancy_orienteering,
+    height = grid::unit(1.2, "cm"), width = grid::unit(1.2, "cm")
+  ) +
+  ggplot2::geom_sf(data = study_area, fill = NA, color = "black", linewidth = 1) +
+  ggplot2::geom_sf(data = sem_data, ggplot2::aes(fill = sem_residuals),
+                   color = "black", linewidth = 0.2) +
+  ggplot2::scale_fill_gradient2(
+    low = "#3B7FB8", mid = "#F0F0F0", high = "#D73027",
+    midpoint = 0, name = "SEM Residuals", na.value = "transparent"
+  ) +
+  ggplot2::theme_void() +
+  ggplot2::theme(
+    legend.position = "right",
+    legend.key.width = grid::unit(0.4, "cm"),
+    legend.title = ggplot2::element_text(size = 10, face = "bold"),
+    legend.text  = ggplot2::element_text(size = 8)
+  )
+
+ols_data <- sites |>
+  dplyr::filter(!is.na(NUMPOINTS), !is.na(ViewArea_k))
+
+ols_model <- stats::lm(NUMPOINTS ~ ViewArea_k, data = ols_data)
+ols_data$ols_residuals <- stats::residuals(ols_model)
+
+points_for_idw <- sf::st_centroid(ols_data)
+
+crs_for_raster <- if (!is.null(sf::st_crs(study_area)$proj4string)) {
+  sf::st_crs(study_area)$proj4string
+} else {
+  sf::st_crs(study_area)$wkt
+}
+
+ext <- sf::st_bbox(study_area)
+base_raster <- raster::raster(
+  xmn = ext["xmin"], xmx = ext["xmax"],
+  ymn = ext["ymin"], ymx = ext["ymax"],
+  crs = crs_for_raster,
+  resolution = 50
+)
+
+points_sp   <- methods::as(points_for_idw, "Spatial")
+idw_model   <- gstat::gstat(formula = ols_residuals ~ 1, data = points_sp,
+                            nmax = 12, set = list(idp = 2))
+idw_result  <- predict(idw_model, methods::as(base_raster, "SpatialGrid"))
+resid_raster <- raster::raster(idw_result, layer = "var1.pred")
+
+raster_mean <- raster::cellStats(resid_raster, "mean")
+raster_sd   <- raster::cellStats(resid_raster, "sd")
+
+classify_by_sigma <- function(x, m, s) {
+  z <- (x - m) / s
+  dplyr::case_when(
+    z < -2 ~ "- >2 σ",
+    z < -1 ~ "- 1–2 σ",
+    z <  1 ~ "± 1 σ",
+    z <  2 ~ "+ 1–2 σ",
+    TRUE   ~ "+ >2 σ"
+  )
+}
+
+raster_df <- as.data.frame(resid_raster, xy = TRUE)
+names(raster_df)[3] <- "value"
+raster_df <- raster_df |>
+  dplyr::filter(!is.na(value)) |>
+  dplyr::mutate(SdCategory_OLS = classify_by_sigma(value, raster_mean, raster_sd))
+
+ols_sigma_palette <- c(
+  "- >2 σ" = "#1F5A97", "- 1–2 σ" = "#82C0D1",
+  "± 1 σ" = "#FFFFFF", "+ 1–2 σ" = "#FFE66D",
+  "+ >2 σ" = "#F57C35"
+)
+category_order <- c("- >2 σ", "- 1–2 σ", "± 1 σ", "+ 1–2 σ", "+ >2 σ")
+raster_df$SdCategory_OLS <- factor(raster_df$SdCategory_OLS, levels = category_order)
+
+p2 <- ggplot2::ggplot() +
+  ggspatial::annotation_scale(location = "bl", width_hint = 0.3) +
+  ggspatial::annotation_north_arrow(
+    location = "tr", which_north = "true",
+    style = ggspatial::north_arrow_fancy_orienteering,
+    height = grid::unit(1.2, "cm"), width = grid::unit(1.2, "cm")
+  ) +
+  ggplot2::geom_raster(data = raster_df, ggplot2::aes(x = x, y = y, fill = SdCategory_OLS)) +
+  ggplot2::geom_sf(data = study_area, fill = NA, color = "black", linewidth = 1) +
+  ggplot2::scale_fill_manual(
+    values = ols_sigma_palette, name = "OLS Residuals (IDW ±σ)",
+    drop = FALSE, na.value = "transparent"
+  ) +
+  ggplot2::theme_void() +
+  ggplot2::theme(
+    legend.position = "right",
+    legend.title = ggplot2::element_text(size = 10, face = "bold"),
+    legend.text  = ggplot2::element_text(size = 8)
+  )
+
+print(p1)
+print(p2)
+```
