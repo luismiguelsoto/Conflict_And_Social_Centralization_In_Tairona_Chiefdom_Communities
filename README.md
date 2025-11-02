@@ -18,7 +18,7 @@ Repository Structure:
    - The main R script (or R Markdown file) contains the code to:
      a) Load required packages.
      b) Download the Excel datasets and GIS files directly from GitHub.
-     c) Process the data and perform network analysis.
+     c) Process the data and perform the analysis.
      d) Generate the figures or tables as presented in the manuscript.
 
 Software and Key Package Versions:
